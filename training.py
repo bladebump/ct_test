@@ -1,10 +1,13 @@
 import argparse
 import datetime
+import os.path
+
 import numpy as np
 import sys
 
 import torch
 from torch.utils.data import DataLoader
+from torch.utils.tensorboard import SummaryWriter
 
 from dstes import LunaDatasets
 from modle import LunaModule
@@ -41,10 +44,12 @@ class LunaTrainingApp:
         self.use_cuda = torch.cuda.is_available()
         self.device = torch.device('cuda' if self.use_cuda else 'cpu')
 
+        self.trn_writer = None
+        self.val_writer = None
+        self.total_training_samples_count = 0
+
         self.model = self.init_module()
         self.optimizer = self.init_optimizer()
-
-        self.total_training_samples_count = 0
 
     def init_module(self):
         model = LunaModule()
@@ -77,6 +82,12 @@ class LunaTrainingApp:
                             pin_memory=self.use_cuda)
         return val_dl
 
+    def init_tensorboard_writers(self):
+        if self.trn_writer is None:
+            log_dir = os.path.join('runs', self.cli_args.tb_prefix, self.time_str)
+            self.trn_writer = SummaryWriter(log_dir=log_dir + '-trn_cls-' + self.cli_args.comment)
+            self.val_writer = SummaryWriter(log_dir=log_dir + '-val_cls-' + self.cli_args.comment)
+
     def main(self):
         log.info(f"开始 {type(self).__name__},{self.cli_args}")
         train_dl = self.init_train_dataloader()
@@ -88,6 +99,10 @@ class LunaTrainingApp:
 
             val_metrics_t = self.do_validation(epoch_ndx, val_dl)
             self.log_metrics(epoch_ndx, '验证', val_metrics_t)
+
+        if hasattr(self, 'trn_writer'):
+            self.trn_writer.close()
+            self.val_writer.close()
 
     def do_training(self, epoch_ndx, train_dl):
         self.model.train()
@@ -136,6 +151,8 @@ class LunaTrainingApp:
         return loss_g.mean()
 
     def log_metrics(self, epoch_ndx, mode_str, metrics_t, classification_threshold=0.5):
+        self.init_tensorboard_writers()
+        log.info(f"第{epoch_ndx}轮 {type(self).__name__}")
         neg_label_mask = metrics_t[METRICS_LABEL_NDX] <= classification_threshold
         neg_pred_mask = metrics_t[METRICS_PRED_NDX] <= classification_threshold
 
@@ -162,18 +179,35 @@ class LunaTrainingApp:
         )
 
         log.info(
-            "第{}轮 {:8} 损失是 {loss/all:.4f},正确率 {correct/all:-5.1f}%, ({neg_correct:} / {neg_count})".format(epoch_ndx,
+            "第{}轮 {:8} 损失是 {loss/neg:.4f},正确率 {correct/neg:-5.1f}%, ({neg_correct:} / {neg_count})".format(epoch_ndx,
                                                                                                            "阴性" + mode_str,
                                                                                                            neg_correct=neg_correct,
                                                                                                            neg_count=neg_count,
                                                                                                            **metrics_dict))
 
         log.info(
-            "第{}轮 {:8} 损失是 {loss/all:.4f},正确率 {correct/all:-5.1f}%, ({pos_correct:} / {pos_count})".format(epoch_ndx,
+            "第{}轮 {:8} 损失是 {loss/pos:.4f},正确率 {correct/pos:-5.1f}%, ({pos_correct:} / {pos_count})".format(epoch_ndx,
                                                                                                            "阳性" + mode_str,
                                                                                                            pos_correct=pos_correct,
                                                                                                            pos_count=pos_count,
                                                                                                            **metrics_dict))
+
+        writer = getattr(self, mode_str + '_writer')
+        for key, value in metrics_dict.items():
+            writer.add_scalar(key, value, self.total_training_samples_count)
+
+        writer.add_pr_curve('pr', metrics_t[METRICS_LABEL_NDX], metrics_t[METRICS_PRED_NDX],
+                            self.total_training_samples_count)
+        bins = [x / 50.0 for x in range(51)]
+        neg_hist_mask = neg_label_mask & (metrics_t[METRICS_PRED_NDX] > 0.01)
+        pos_hist_mask = pos_label_mask & (metrics_t[METRICS_PRED_NDX] > 0.99)
+
+        if neg_hist_mask.any():
+            writer.add_histogram('is_neg', metrics_t[METRICS_PRED_NDX, neg_hist_mask],
+                                 self.total_training_samples_count, bins=bins)
+        if pos_hist_mask.any():
+            writer.add_histogram('is_pos', metrics_t[METRICS_PRED_NDX, pos_hist_mask],
+                                 self.total_training_samples_count, bins=bins)
 
 
 if __name__ == "__main__":
