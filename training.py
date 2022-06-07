@@ -3,7 +3,7 @@ import datetime
 import numpy as np
 import sys
 
-import torch.dml
+import torch
 from torch.utils.data import DataLoader
 
 from dstes import LunaDatasets
@@ -28,8 +28,8 @@ class LunaTrainingApp:
         if sys_argv is None:
             sys_argv = sys.argv[1:]
         parser = argparse.ArgumentParser()
-        parser.add_argument('--num-workers', help='后台数据加载的核心数目', default=8, type=int)
-        parser.add_argument('--batch-size', help='每轮训练的batch大小', default=32, type=int, )
+        parser.add_argument('--num-workers', help='后台数据加载的核心数目', default=2, type=int)
+        parser.add_argument('--batch-size', help='每轮训练的batch大小', default=64, type=int, )
         parser.add_argument('--epochs', help='训练的轮数', default=1, type=int, )
         parser.add_argument('--tb-prefix', default='luna',
                             help="Data prefix to use for Tensorboard run. Defaults to chapter.", )
@@ -38,9 +38,8 @@ class LunaTrainingApp:
         self.cli_args = parser.parse_args(sys_argv)
         self.time_str = datetime.datetime.now().strftime('%Y-%m-%d_%H.%M.%S')
 
-        self.use_dml = torch.dml.is_available()
-        # self.use_dml = False
-        self.device = torch.device('dml' if self.use_dml else 'cpu')
+        self.use_cuda = torch.cuda.is_available()
+        self.device = torch.device('cuda' if self.use_cuda else 'cpu')
 
         self.model = self.init_module()
         self.optimizer = self.init_optimizer()
@@ -49,8 +48,8 @@ class LunaTrainingApp:
 
     def init_module(self):
         model = LunaModule()
-        if self.use_dml:
-            log.info(f"using DML")
+        if self.use_cuda:
+            log.info(f"using cuda")
             model = model.to(self.device)
         return model
 
@@ -61,21 +60,21 @@ class LunaTrainingApp:
     def init_train_dataloader(self):
         train_ds = LunaDatasets(val_stride=10, is_val_set_bool=False)
         batch_size = self.cli_args.batch_size
-        if self.use_dml:
-            batch_size *= 1
+        if self.use_cuda:
+            batch_size *= torch.cuda.device_count()
 
         train_dl = DataLoader(train_ds, batch_size=batch_size, num_workers=self.cli_args.num_workers,
-                              pin_memory=self.use_dml)
+                              pin_memory=self.use_cuda)
         return train_dl
 
     def init_val_dataloader(self):
         val_ds = LunaDatasets(val_stride=10, is_val_set_bool=True)
         batch_size = self.cli_args.batch_size
-        if self.use_dml:
-            batch_size *= 1
+        if self.use_cuda:
+            batch_size *= torch.cuda.device_count()
 
         val_dl = DataLoader(val_ds, batch_size=batch_size, num_workers=self.cli_args.num_workers,
-                            pin_memory=self.use_dml)
+                            pin_memory=self.use_cuda)
         return val_dl
 
     def main(self):
@@ -154,9 +153,9 @@ class LunaTrainingApp:
         metrics_dict['loss/neg'] = metrics_t[METRICS_LOSS_NDX, neg_label_mask].mean()
         metrics_dict['loss/pos'] = metrics_t[METRICS_LOSS_NDX, pos_label_mask].mean()
 
-        metrics_dict['correct/all'] = (pos_correct + neg_correct) / np.float(metrics_t.shape[1]) * 100
-        metrics_dict['correct/neg'] = neg_correct / np.float(neg_count) * 100
-        metrics_dict['correct/pos'] = pos_correct / np.float(pos_count) * 100
+        metrics_dict['correct/all'] = (pos_correct + neg_correct) / float(metrics_t.shape[1]) * 100
+        metrics_dict['correct/neg'] = neg_correct / float(neg_count) * 100
+        metrics_dict['correct/pos'] = pos_correct / float(pos_count) * 100
 
         log.info(
             "第{}轮 {:8} 损失是 {loss/all:.4f},正确率 {correct/all:-5.1f}%, ".format(epoch_ndx, mode_str, **metrics_dict)

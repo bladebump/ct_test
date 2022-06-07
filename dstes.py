@@ -26,7 +26,7 @@ raw_cache = get_cache('raw')
 
 @functools.lru_cache(1)
 def get_candidate_info_list(require_on_disk_bool=True):
-    mhd_list = root_dir_path.glob('subset0/*.mhd')
+    mhd_list = root_dir_path.glob('subset*/*.mhd')
     present_on_dist = {p.parts[-1][:-4] for p in mhd_list}
 
     diameter_dict = {}
