@@ -95,10 +95,10 @@ class LunaTrainingApp:
 
         for epoch_ndx in range(1, self.cli_args.epochs + 1):
             trn_metrics_t = self.do_training(epoch_ndx, train_dl)
-            self.log_metrics(epoch_ndx, '训练', trn_metrics_t)
+            self.log_metrics(epoch_ndx, 'trn', trn_metrics_t)
 
             val_metrics_t = self.do_validation(epoch_ndx, val_dl)
-            self.log_metrics(epoch_ndx, '验证', val_metrics_t)
+            self.log_metrics(epoch_ndx, 'val', val_metrics_t)
 
         if hasattr(self, 'trn_writer'):
             self.trn_writer.close()
