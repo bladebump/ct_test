@@ -37,6 +37,7 @@ class LunaTrainingApp:
         parser.add_argument('--tb-prefix', default='luna',
                             help="Data prefix to use for Tensorboard run. Defaults to chapter.", )
         parser.add_argument('comment', help="Comment suffix for Tensorboard run.", nargs='?', default='dwlpt')
+        parser.add_argument('--conti', help="是否通过保存的节点继续", default=False, type=bool)
 
         self.cli_args = parser.parse_args(sys_argv)
         self.time_str = datetime.datetime.now().strftime('%Y-%m-%d_%H.%M.%S')
@@ -50,6 +51,11 @@ class LunaTrainingApp:
 
         self.model = self.init_module()
         self.optimizer = self.init_optimizer()
+
+        self.save_path = os.path.join("checkpt", "luna.pth")
+
+        if self.cli_args.conti:
+            self.load()
 
     def init_module(self):
         model = LunaModule()
@@ -209,6 +215,19 @@ class LunaTrainingApp:
             writer.add_histogram('is_pos', metrics_t[METRICS_PRED_NDX, pos_hist_mask],
                                  self.total_training_samples_count, bins=bins)
 
+    def save(self):
+        torch.save(dict(model=self.model.state_dict(), optimizer=self.optimizer.state_dict()), self.save_path)
+
+    def load(self):
+        if os.path.exists(self.save_path):
+            save_dict = torch.load(self.save_path, map_location=self.device)
+            self.model.load_state_dict(save_dict['model'])
+            self.optimizer.load_state_dict(save_dict['optimizer'])
+
 
 if __name__ == "__main__":
-    LunaTrainingApp().main()
+    m = LunaTrainingApp()
+    try:
+        m.main()
+    except KeyboardInterrupt:
+        m.save()
