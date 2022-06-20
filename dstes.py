@@ -1,6 +1,8 @@
 import copy
 import csv
 import functools
+import logging
+import math
 import pathlib
 import datetime
 import random
@@ -11,9 +13,15 @@ from collections import namedtuple
 import numpy as np
 import torch
 from torch.utils.data import Dataset
+import torch.nn.functional as F
 
 from util.util import XyzTuple, xyz2irc, enumerate_with_estimate
 from util.disk import get_cache
+
+log = logging.getLogger(__name__)
+# log.setLevel(logging.WARN)
+# log.setLevel(logging.INFO)
+log.setLevel(logging.DEBUG)
 
 CandidateInfoTuple = namedtuple(
     'CandidateInfoTuple',
@@ -114,10 +122,65 @@ def get_ct_raw_candidate(series_uid, center_xyz, width_irc):
     return ct_chunk, center_irc
 
 
+def get_ct_augmented_candidate(augmentation_dict, series_uid, center_xyz, width_irc, use_cache=True):
+    if use_cache:
+        ct_chunk, center_irc = get_ct_raw_candidate(series_uid, center_xyz, width_irc)
+    else:
+        ct = get_ct(series_uid)
+        ct_chunk, center_irc = ct.get_raw_candidate(center_xyz, width_irc)
+    ct_t = torch.tensor(ct_chunk).unsqueeze(0).unsqueeze(0).to(torch.float32)
+
+    transform_t = torch.eye(4)
+    for i in range(3):
+        if 'flip' in augmentation_dict:
+            if random.random() > 0.5:
+                transform_t[i, i] *= -1
+
+        if 'offset' in augmentation_dict:
+            offset_float = augmentation_dict['offset']
+            random_float = (random.random() * 2 - 1)
+            transform_t[i, 3] = offset_float * random_float
+
+        if 'scale' in augmentation_dict:
+            scale_float = augmentation_dict['scale']
+            random_float = (random.random() * 2 - 1)
+            transform_t[i, i] *= 1.0 + scale_float * random_float
+
+    if 'rotate' in augmentation_dict:
+        angle_rad = random.random() * math.pi * 2
+        s = math.sin(angle_rad)
+        c = math.cos(angle_rad)
+
+        rotation_t = torch.tensor([
+            [c, -s, 0, 0],
+            [s, c, 0, 0],
+            [0, 0, 1, 0],
+            [0, 0, 0, 1]
+        ])
+        transform_t @= rotation_t
+
+    affine_t = F.affine_grid(transform_t[:3].unsqueeze(0).to(torch.float32), ct_t.size(), align_corners=False)
+    augmented_chunk = F.grid_sample(ct_t, affine_t, padding_mode='border', align_corners=False).to('cpu')
+    if 'noise' in augmentation_dict:
+        noise_t = torch.randn_like(augmented_chunk)
+        noise_t *= augmented_chunk['noise']
+        augmented_chunk += noise_t
+
+    return augmented_chunk[0], center_irc
+
+
 class LunaDatasets(Dataset):
-    def __init__(self, val_stride=0, is_val_set_bool=None, series_uid=None, ratio_int=0):
-        self.candidate_info_list = copy.copy(get_candidate_info_list())
+    def __init__(self, val_stride=0, is_val_set_bool=None, series_uid=None, sortby_str='random', ratio_int=0,
+                 augmentation_dict=None, candidate_info_list=None):
         self.ratio_int = ratio_int
+        self.augmentation_dict = augmentation_dict
+
+        if candidate_info_list:
+            self.candidate_info_list = copy.copy(candidate_info_list)
+            self.use_cache = True
+        else:
+            self.candidate_info_list = copy.copy(get_candidate_info_list())
+            self.use_cache = False
 
         if series_uid:
             self.candidate_info_list = [x for x in self.candidate_info_list if x.series_uid == series_uid]
@@ -130,8 +193,26 @@ class LunaDatasets(Dataset):
             del self.candidate_info_list[::val_stride]
             assert self.candidate_info_list
 
+        if sortby_str == 'random':
+            random.shuffle(self.candidate_info_list)
+        elif sortby_str == 'series_uid':
+            self.candidate_info_list.sort(key=lambda x: (x.series_uid, x.center_xyz))
+        elif sortby_str == 'label_and_size':
+            pass
+        else:
+            raise Exception("未知的数据集排序方式:" + repr(sortby_str))
+
         self.negative_list = [nt for nt in self.candidate_info_list if not nt.isNodule_bool]
         self.pos_list = [nt for nt in self.candidate_info_list if nt.isNodule_bool]
+
+        log.info("{!r}: {} {} 样本, {} neg, {} pos, {} ratio".format(
+            self,
+            len(self.candidate_info_list),
+            "验证" if is_val_set_bool else "训练",
+            len(self.negative_list),
+            len(self.pos_list),
+            '{}:1'.format(self.ratio_int) if self.ratio_int else 'unbalanced'
+        ))
 
     def shuffle_samples(self):
         if self.ratio_int:
@@ -158,14 +239,28 @@ class LunaDatasets(Dataset):
         else:
             candidate_info_tup = self.candidate_info_list[ndx]
         width_irc = (32, 48, 48)
-        candidate_a, center_irc = get_ct_raw_candidate(
-            candidate_info_tup.series_uid,
-            candidate_info_tup.center_xyz,
-            width_irc
-        )
-        candidate_t = torch.from_numpy(candidate_a)
-        candidate_t = candidate_t.to(torch.float32)
-        candidate_t = candidate_t.unsqueeze(0)
+
+        if self.augmentation_dict:
+            candidate_t, center_irc = get_ct_augmented_candidate(self.augmentation_dict, candidate_info_tup.series_uid,
+                                                                 candidate_info_tup.center_xyz, width_irc,
+                                                                 self.use_cache)
+        elif self.use_cache:
+            candidate_a, center_irc = get_ct_raw_candidate(
+                candidate_info_tup.series_uid,
+                candidate_info_tup.center_xyz,
+                width_irc
+            )
+            candidate_t = torch.from_numpy(candidate_a)
+            candidate_t = candidate_t.to(torch.float32)
+            candidate_t = candidate_t.unsqueeze(0)
+        else:
+            ct = get_ct(candidate_info_tup.series_uid)
+            candidate_a, center_irc = ct.get_raw_candidate(
+                candidate_info_tup.center_xyz,
+                width_irc,
+            )
+            candidate_t = torch.from_numpy(candidate_a).to(torch.float32)
+            candidate_t = candidate_t.unsqueeze(0)
 
         pos_t = torch.tensor([not candidate_info_tup.isNodule_bool, candidate_info_tup.isNodule_bool], dtype=torch.long)
         return candidate_t, pos_t, candidate_info_tup.series_uid, torch.tensor(center_irc)

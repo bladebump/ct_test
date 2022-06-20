@@ -39,6 +39,11 @@ class LunaTrainingApp:
         parser.add_argument('comment', help="Comment suffix for Tensorboard run.", nargs='?', default='dwlpt')
         parser.add_argument('--conti', help="是否通过保存的节点继续", action='store_true', default=False)
         parser.add_argument('--balanced', help='是否平很数据集中的正负样本数量', action='store_true', default=False)
+        parser.add_argument('--augment-flip', help="使用镜像增强数据", action='store_true', default=False, )
+        parser.add_argument('--augment-offset', help="使用平移增强数据", action='store_true', default=False, )
+        parser.add_argument('--augment-scale', help="使用缩放增强数据", action='store_true', default=False, )
+        parser.add_argument('--augment-rotate', help="使用旋转增强数据", action='store_true', default=False, )
+        parser.add_argument('--augment-noise', help="使用噪声增强数据", action='store_true', default=False, )
 
         self.cli_args = parser.parse_args(sys_argv)
         self.time_str = datetime.datetime.now().strftime('%Y-%m-%d_%H.%M.%S')
@@ -49,6 +54,18 @@ class LunaTrainingApp:
         self.trn_writer = None
         self.val_writer = None
         self.total_training_samples_count = 0
+
+        self.augmentation_dict = {}
+        if self.cli_args.augmented or self.cli_args.augment_flip:
+            self.augmentation_dict['flip'] = True
+        if self.cli_args.augmented or self.cli_args.augment_offset:
+            self.augmentation_dict['offset'] = 0.1
+        if self.cli_args.augmented or self.cli_args.augment_scale:
+            self.augmentation_dict['scale'] = 0.2
+        if self.cli_args.augmented or self.cli_args.augment_rotate:
+            self.augmentation_dict['rotate'] = True
+        if self.cli_args.augmented or self.cli_args.augment_noise:
+            self.augmentation_dict['noise'] = 25.0
 
         self.model = self.init_module()
         self.optimizer = self.init_optimizer()
@@ -61,7 +78,9 @@ class LunaTrainingApp:
     def init_module(self):
         model = LunaModule()
         if self.use_cuda:
-            log.info(f"using cuda")
+            log.info("Using CUDA; {} devices.".format(torch.cuda.device_count()))
+            if torch.cuda.device_count() > 1:
+                model = nn.DataParallel(model)
             model = model.to(self.device)
         return model
 
@@ -70,7 +89,8 @@ class LunaTrainingApp:
         return Adam(self.model.parameters())
 
     def init_train_dataloader(self):
-        train_ds = LunaDatasets(val_stride=10, is_val_set_bool=False, ratio_int=int(self.cli_args.balanced))
+        train_ds = LunaDatasets(val_stride=10, is_val_set_bool=False, ratio_int=int(self.cli_args.balanced),
+                                augmentation_dict=self.augmentation_dict)
         batch_size = self.cli_args.batch_size
         if self.use_cuda:
             batch_size *= torch.cuda.device_count()
