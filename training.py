@@ -37,7 +37,8 @@ class LunaTrainingApp:
         parser.add_argument('--tb-prefix', default='luna',
                             help="Data prefix to use for Tensorboard run. Defaults to chapter.", )
         parser.add_argument('comment', help="Comment suffix for Tensorboard run.", nargs='?', default='dwlpt')
-        parser.add_argument('--conti', help="是否通过保存的节点继续", default=False, type=bool)
+        parser.add_argument('--conti', help="是否通过保存的节点继续", action='store_true', default=False)
+        parser.add_argument('--balanced', help='是否平很数据集中的正负样本数量', action='store_true', default=False)
 
         self.cli_args = parser.parse_args(sys_argv)
         self.time_str = datetime.datetime.now().strftime('%Y-%m-%d_%H.%M.%S')
@@ -69,7 +70,7 @@ class LunaTrainingApp:
         return Adam(self.model.parameters())
 
     def init_train_dataloader(self):
-        train_ds = LunaDatasets(val_stride=10, is_val_set_bool=False)
+        train_ds = LunaDatasets(val_stride=10, is_val_set_bool=False, ratio_int=int(self.cli_args.balanced))
         batch_size = self.cli_args.batch_size
         if self.use_cuda:
             batch_size *= torch.cuda.device_count()
@@ -168,8 +169,11 @@ class LunaTrainingApp:
         neg_count = int(neg_label_mask.sum())
         pos_count = int(pos_label_mask.sum())
 
-        neg_correct = int((neg_label_mask & neg_pred_mask).sum())
-        pos_correct = int((pos_label_mask & pos_pred_mask).sum())
+        ture_neg_count = neg_correct = int((neg_label_mask & neg_pred_mask).sum())
+        true_pos_count = pos_correct = int((pos_label_mask & pos_pred_mask).sum())
+
+        false_neg_count = neg_count - neg_correct
+        false_pos_count = pos_correct - pos_correct
 
         metrics_dict = {}
         metrics_dict['loss/all'] = metrics_t[METRICS_LOSS_NDX].mean()
@@ -180,8 +184,12 @@ class LunaTrainingApp:
         metrics_dict['correct/neg'] = neg_correct / float(neg_count) * 100
         metrics_dict['correct/pos'] = pos_correct / float(pos_count) * 100
 
+        precision = metrics_t['pr/precision'] = true_pos_count / np.float32(true_pos_count + false_pos_count)
+        recall = metrics_t['pr/recall'] = true_pos_count / np.float32(true_pos_count + false_neg_count)
+        metrics_t['pr/f1_score'] = 2 * (precision * recall) / (precision + recall)
         log.info(
-            "第{}轮 {:8} 损失是 {loss/all:.4f},正确率 {correct/all:-5.1f}%, ".format(epoch_ndx, mode_str, **metrics_dict)
+            "第{}轮 {:8} 损失是 {loss/all:.4f},正确率 {correct/all:-5.1f}%,精度 {pr/precision},召回率 {pr/recall},F1 {pr/f1_score}".format(
+                epoch_ndx, mode_str, **metrics_dict)
         )
 
         log.info(

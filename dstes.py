@@ -115,11 +115,9 @@ def get_ct_raw_candidate(series_uid, center_xyz, width_irc):
 
 
 class LunaDatasets(Dataset):
-    def __init__(self, val_stride=0, is_val_set_bool=None, series_uid=None, shuffle=False):
+    def __init__(self, val_stride=0, is_val_set_bool=None, series_uid=None, ratio_int=0):
         self.candidate_info_list = copy.copy(get_candidate_info_list())
-
-        if shuffle:
-            random.shuffle(self.candidate_info_list)
+        self.ratio_int = ratio_int
 
         if series_uid:
             self.candidate_info_list = [x for x in self.candidate_info_list if x.series_uid == series_uid]
@@ -132,11 +130,33 @@ class LunaDatasets(Dataset):
             del self.candidate_info_list[::val_stride]
             assert self.candidate_info_list
 
+        self.negative_list = [nt for nt in self.candidate_info_list if not nt.isNodule_bool]
+        self.pos_list = [nt for nt in self.candidate_info_list if nt.isNodule_bool]
+
+    def shuffle_samples(self):
+        if self.ratio_int:
+            random.shuffle(self.negative_list)
+            random.shuffle(self.pos_list)
+
     def __len__(self):
-        return len(self.candidate_info_list)
+        if self.ratio_int:
+            return 20000
+        else:
+            return len(self.candidate_info_list)
 
     def __getitem__(self, ndx):
-        candidate_info_tup = self.candidate_info_list[ndx]
+        if self.ratio_int:
+            pos_ndx = ndx
+
+            if ndx % (self.ratio_int + 1):
+                neg_ndx = ndx - 1 - pos_ndx
+                neg_ndx %= len(self.negative_list)
+                candidate_info_tup = self.negative_list[neg_ndx]
+            else:
+                pos_ndx %= len(self.pos_list)
+                candidate_info_tup = self.pos_list[pos_ndx]
+        else:
+            candidate_info_tup = self.candidate_info_list[ndx]
         width_irc = (32, 48, 48)
         candidate_a, center_irc = get_ct_raw_candidate(
             candidate_info_tup.series_uid,
