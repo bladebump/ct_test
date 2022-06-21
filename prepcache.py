@@ -4,7 +4,7 @@ import sys
 
 from torch.utils.data import DataLoader
 
-from dsets_book import LunaDataset
+from dstes import LunaDatasets
 from util.util import enumerate_with_estimate
 
 log = logging.getLogger(__name__)
@@ -35,7 +35,7 @@ class LunaPrepCacheApp:
         log.info("Starting {}, {}".format(type(self).__name__, self.cli_args))
 
         self.prep_dl = DataLoader(
-            LunaDataset(
+            LunaDatasets(
                 sortby_str='series_uid',
             ),
             batch_size=self.cli_args.batch_size,

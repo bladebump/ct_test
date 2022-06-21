@@ -177,10 +177,10 @@ class LunaDatasets(Dataset):
 
         if candidate_info_list:
             self.candidate_info_list = copy.copy(candidate_info_list)
-            self.use_cache = True
+            self.use_cache = False
         else:
             self.candidate_info_list = copy.copy(get_candidate_info_list())
-            self.use_cache = False
+            self.use_cache = True
 
         if series_uid:
             self.candidate_info_list = [x for x in self.candidate_info_list if x.series_uid == series_uid]
@@ -264,25 +264,3 @@ class LunaDatasets(Dataset):
 
         pos_t = torch.tensor([not candidate_info_tup.isNodule_bool, candidate_info_tup.isNodule_bool], dtype=torch.long)
         return candidate_t, pos_t, candidate_info_tup.series_uid, torch.tensor(center_irc)
-
-
-def test1():
-    start = datetime.datetime.now()
-    ds = LunaDatasets()
-    iter = enumerate_with_estimate(ds, "test")
-    for i, data in iter:
-        if data[0].shape[1] != 32:
-            print(data[0].shape, data[1], data[2], data[3])
-    end = datetime.datetime.now()
-    print(end - start)
-
-
-def test2():
-    ds = LunaDatasets()
-    i, data = next(enumerate(ds))
-    input_t, label_t, _series_list, _center_list = batch_tup = data
-    print(label_t)
-
-
-if __name__ == "__main__":
-    test1()

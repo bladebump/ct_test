@@ -44,6 +44,7 @@ class LunaTrainingApp:
         parser.add_argument('--augment-scale', help="使用缩放增强数据", action='store_true', default=False, )
         parser.add_argument('--augment-rotate', help="使用旋转增强数据", action='store_true', default=False, )
         parser.add_argument('--augment-noise', help="使用噪声增强数据", action='store_true', default=False, )
+        parser.add_argument('--augmented',help="使用全部数据增强", action='store_true', default=False)
 
         self.cli_args = parser.parse_args(sys_argv)
         self.time_str = datetime.datetime.now().strftime('%Y-%m-%d_%H.%M.%S')
