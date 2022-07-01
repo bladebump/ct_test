@@ -134,8 +134,8 @@ class LunaTrainingApp:
 
     def do_training(self, epoch_ndx, train_dl):
         self.model.train()
+        train_dl.dataset.shuffle_samples()
         trn_metrics_g = torch.zeros(METRICS_SIZE, len(train_dl.dataset), device=self.device)
-
         batch_iter = enumerate_with_estimate(train_dl, "第{}轮训练".format(epoch_ndx), start_ndx=train_dl.num_workers)
 
         for batch_ndx, batch_tup in batch_iter:
@@ -205,9 +205,9 @@ class LunaTrainingApp:
         metrics_dict['correct/neg'] = neg_correct / float(neg_count) * 100
         metrics_dict['correct/pos'] = pos_correct / float(pos_count) * 100
 
-        precision = metrics_t['pr/precision'] = true_pos_count / np.float32(true_pos_count + false_pos_count)
-        recall = metrics_t['pr/recall'] = true_pos_count / np.float32(true_pos_count + false_neg_count)
-        metrics_t['pr/f1_score'] = 2 * (precision * recall) / (precision + recall)
+        precision = metrics_dict['pr/precision'] = true_pos_count / np.float32(true_pos_count + false_pos_count)
+        recall = metrics_dict['pr/recall'] = true_pos_count / np.float32(true_pos_count + false_neg_count)
+        metrics_dict['pr/f1_score'] = 2 * (precision * recall) / (precision + recall)
         log.info(
             "第{}轮 {:8} 损失是 {loss/all:.4f},正确率 {correct/all:-5.1f}%,精度 {pr/precision},召回率 {pr/recall},F1 {pr/f1_score}".format(
                 epoch_ndx, mode_str, **metrics_dict)
