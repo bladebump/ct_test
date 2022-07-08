@@ -25,7 +25,7 @@ log.setLevel(logging.DEBUG)
 
 CandidateInfoTuple = namedtuple(
     'CandidateInfoTuple',
-    'isNodule_bool,diameter_mm,series_uid,center_xyz',
+    'isNodule_bool,hasAnnotation_bool,isMal_bool,diameter_mm,series_uid,center_xyz',
 )
 
 root_dir_path = pathlib.Path('data')
@@ -37,15 +37,17 @@ def get_candidate_info_list(require_on_disk_bool=True):
     mhd_list = root_dir_path.glob('subset*/*.mhd')
     present_on_dist = {p.parts[-1][:-4] for p in mhd_list}
 
-    diameter_dict = {}
-    with open(root_dir_path.joinpath('annotations.csv'), 'r') as f:
+    candidate_info_list = []
+    with open(root_dir_path.joinpath('annotations_with_malignancy.csv'), 'r') as f:
         for row in list(csv.reader(f))[1:]:
             series_uid = row[0]
             annotation_center_xyz = tuple([float(x) for x in row[1:4]])
             annotation_diameter_mm = float(row[4])
-            diameter_dict.setdefault(series_uid, []).append((annotation_center_xyz, annotation_diameter_mm))
+            is_mal_bool = {'False': False, 'True': True}[row[5]]
 
-    candidate_info_list = []
+            candidate_info_list.append(
+                CandidateInfoTuple(True, True, is_mal_bool, annotation_diameter_mm, series_uid, annotation_center_xyz))
+
     with open(root_dir_path.joinpath('candidates.csv'), 'r') as f:
         for row in list(csv.reader(f))[1:]:
             series_uid = row[0]
@@ -56,24 +58,23 @@ def get_candidate_info_list(require_on_disk_bool=True):
             is_nodule_bool = bool(int(row[4]))
             candidate_center_xyz = tuple([float(x) for x in row[1:4]])
 
-            candidate_diameter_mm = 0.0
-            for annotation_tup in diameter_dict.get(series_uid, []):
-                annotation_center_xyz, annotation_diameter_mm = annotation_tup
-                for i in range(3):
-                    delta_mm = abs(candidate_center_xyz[i] - annotation_center_xyz[i])
-                    if delta_mm > annotation_diameter_mm / 4:
-                        break
-                else:
-                    candidate_diameter_mm = annotation_diameter_mm
-                    break
-            candidate_info_list.append(
-                CandidateInfoTuple(
-                    is_nodule_bool, candidate_diameter_mm, series_uid, candidate_center_xyz
-                )
-            )
+            if not is_nodule_bool:
+                candidate_info_list.append(
+                    CandidateInfoTuple(False, False, False, 0.0, series_uid, candidate_center_xyz))
 
     candidate_info_list.sort(reverse=True)
     return candidate_info_list
+
+
+@functools.lru_cache(1)
+def get_candidate_info_dict(require_disk_bool=True):
+    candidate_info_list = get_candidate_info_list(require_disk_bool)
+    candidate_info_dict = {}
+
+    for candidate_tup in candidate_info_list:
+        candidate_info_dict.setdefault(candidate_tup.series_uid, []).append(candidate_tup)
+
+    return candidate_info_dict
 
 
 class Ct:
@@ -89,6 +90,59 @@ class Ct:
         self.origin_xyz = XyzTuple(*ct_mhd.GetOrigin())
         self.vx_size_xyz = XyzTuple(*ct_mhd.GetSpacing())
         self.direction_a = np.array(ct_mhd.GetDirection()).reshape(3, 3)
+
+        candidate_info_list = get_candidate_info_dict()[self.series_uid]
+        self.positive_info_list = [candidate_tup for candidate_tup in candidate_info_list if
+                                   candidate_tup.isNodule_bool]
+        self.positive_mask = self.build_annotation_mask(self.positive_info_list)
+        self.positive_indexes = (self.positive_mask.sum(axis=(1, 2)).nonzero()[0].tolist())
+
+    def build_annotation_mask(self, positive_info_list, threshold_hu=-700):
+        bounding_box_a = np.zeros_like(self.hu_a, dtype=np.bool)
+
+        for candidate_info_tup in positive_info_list:
+            center_irc = xyz2irc(
+                candidate_info_tup.center_xyz,
+                self.origin_xyz,
+                self.vx_size_xyz,
+                self.direction_a
+            )
+            ci = int(center_irc.index)
+            cr = int(center_irc.row)
+            cc = int(center_irc.col)
+
+            index_radius = 2
+            try:
+                while self.hu_a[ci + index_radius, cr, cc] > threshold_hu and self.hu_a[
+                    ci - index_radius, cr, cc] > threshold_hu:
+                    index_radius += 1
+            except IndexError:
+                index_radius -= 1
+
+            row_radius = 2
+            try:
+                while self.hu_a[ci, cr + row_radius, cc] > threshold_hu and self.hu_a[
+                    ci, cr - row_radius, cc] > threshold_hu:
+                    row_radius += 1
+            except IndexError:
+                row_radius -= 1
+
+            col_radius = 2
+            try:
+                while self.hu_a[ci, cr, cc + col_radius] > threshold_hu and self.hu_a[
+                    ci, cr, cc - col_radius] > threshold_hu:
+                    col_radius += 1
+            except IndexError:
+                col_radius -= 1
+
+            bounding_box_a[
+            ci - index_radius: ci + index_radius + 1,
+            cr - row_radius: cr + row_radius + 1,
+            cc - col_radius: cc + col_radius + 1] = True
+
+        mask_a = bounding_box_a & (self.hu_a > threshold_hu)
+
+        return mask_a
 
     def get_raw_candidate(self, center_xyz, width_irc):
         center_irc = xyz2irc(center_xyz, self.origin_xyz, self.vx_size_xyz, self.direction_a)
@@ -106,8 +160,11 @@ class Ct:
                 end_ndx = self.hu_a.shape[axis]
                 start_ndx = int(self.hu_a.shape[axis] - width_irc[axis])
             slice_list.append(slice(start_ndx, end_ndx))
+
         ct_chunk = self.hu_a[tuple(slice_list)]
-        return ct_chunk, center_irc
+        pos_chunk = self.positive_mask[tuple(slice_list)]
+
+        return ct_chunk, pos_chunk, center_irc
 
 
 @functools.lru_cache(1, typed=True)
@@ -118,8 +175,15 @@ def get_ct(series_uid):
 @raw_cache.memoize(typed=True)
 def get_ct_raw_candidate(series_uid, center_xyz, width_irc):
     ct = get_ct(series_uid)
-    ct_chunk, center_irc = ct.get_raw_candidate(center_xyz, width_irc)
-    return ct_chunk, center_irc
+    ct_chunk, pos_chunk, center_irc = ct.get_raw_candidate(center_xyz, width_irc)
+    ct_chunk.clip(-1000, 1000, ct_chunk)
+    return ct_chunk, pos_chunk, center_irc
+
+
+@raw_cache.memoize(typed=True)
+def get_ct_sample_size(series_uid):
+    ct = Ct(series_uid)
+    return int(ct.hu_a.shape[0]), ct.positive_indexes
 
 
 def get_ct_augmented_candidate(augmentation_dict, series_uid, center_xyz, width_irc, use_cache=True):
@@ -127,7 +191,7 @@ def get_ct_augmented_candidate(augmentation_dict, series_uid, center_xyz, width_
         ct_chunk, center_irc = get_ct_raw_candidate(series_uid, center_xyz, width_irc)
     else:
         ct = get_ct(series_uid)
-        ct_chunk, center_irc = ct.get_raw_candidate(center_xyz, width_irc)
+        ct_chunk, _, center_irc = ct.get_raw_candidate(center_xyz, width_irc)
     ct_t = torch.tensor(ct_chunk).unsqueeze(0).unsqueeze(0).to(torch.float32)
 
     transform_t = torch.eye(4)
@@ -194,7 +258,6 @@ class LunaDatasets(Dataset):
         else:
             raise Exception("未知的数据集排序方式:" + repr(sortby_str))
 
-
         if is_val_set_bool:
             assert val_stride > 0, val_stride
             self.candidate_info_list = self.candidate_info_list[::val_stride]
@@ -256,7 +319,7 @@ class LunaDatasets(Dataset):
             candidate_t = candidate_t.unsqueeze(0)
         else:
             ct = get_ct(candidate_info_tup.series_uid)
-            candidate_a, center_irc = ct.get_raw_candidate(
+            candidate_a, _, center_irc = ct.get_raw_candidate(
                 candidate_info_tup.center_xyz,
                 width_irc,
             )
@@ -265,3 +328,101 @@ class LunaDatasets(Dataset):
 
         pos_t = torch.tensor([not candidate_info_tup.isNodule_bool, candidate_info_tup.isNodule_bool], dtype=torch.long)
         return candidate_t, pos_t, candidate_info_tup.series_uid, torch.tensor(center_irc)
+
+
+class Luna2dSegmentationDataset(Dataset):
+    def __init__(self, val_stride=0, is_val_set_bool=None, series_uid=None, context_slices_count=3, full_ct_bool=False):
+        self.context_slices_count = context_slices_count
+        self.full_ct_bool = full_ct_bool
+
+        if series_uid:
+            self.series_list = [series_uid]
+        else:
+            self.series_list = sorted(get_candidate_info_dict().keys())
+
+        if is_val_set_bool:
+            assert val_stride > 0, val_stride
+            self.series_list = series_uid[::val_stride]
+            assert self.series_list
+        else:
+            del self.series_list[::val_stride]
+            assert self.series_list
+
+        self.sample_list = []
+        for series_uid in self.series_list:
+            index_count, positive_count = get_ct_sample_size(series_uid)
+
+            if self.full_ct_bool:
+                self.sample_list += [(series_uid, slice_ndx) for slice_ndx in range(index_count)]
+            else:
+                self.sample_list += [(series_uid, slice_ndx) for slice_ndx in range(positive_count)]
+
+        self.candidate_info_list = get_candidate_info_list()
+
+        series_set = set(self.candidate_info_list)
+        self.candidate_info_list = [cit for cit in self.candidate_info_list if cit.series_uid in series_set]
+        self.pos_list = [nt for nt in self.candidate_info_list if nt.isNodule_bool]
+
+        log.info("{!r}: {} {} series, {} slices, {} nodules".format(
+            self,
+            len(self.series_list),
+            {None: 'general', True: 'validation', False: 'training'}[is_val_set_bool],
+            len(self.sample_list),
+            len(self.pos_list),
+        ))
+
+    def __len__(self):
+        return len(self.sample_list)
+
+    def __getitem__(self, ndx):
+        series_uid, slice_ndx = self.sample_list[ndx % len(self.sample_list)]
+        return self.getitem_full_slice(series_uid, slice_ndx)
+
+    def getitem_full_slice(self, series_uid, slice_ndx):
+        ct = get_ct(series_uid)
+        ct_t = torch.zeros((self.context_slices_count * 2 + 1, 512, 512))
+
+        start_ndx = slice_ndx - self.context_slices_count
+        end_ndx = slice_ndx + self.context_slices_count + 1
+        for i, context_ndx in enumerate(range(start_ndx, end_ndx)):
+            context_ndx = max(context_ndx, 0)
+            context_ndx = min(context_ndx, ct.hu_a[context_ndx].astype(np.float32))
+            ct_t[i] = torch.from_numpy(ct.hu_a[context_ndx].astype(np.float32))
+
+        ct_t.clamp_(-1000, 1000)
+
+        pos_t = torch.from_numpy(ct.positive_mask[slice_ndx]).unsqueeze(0)
+
+        return ct_t, pos_t, ct.series_uid, slice_ndx
+
+
+class TrainingLuna2dSegmentationDataset(Luna2dSegmentationDataset):
+    def __init__(self, *args, **kwargs):
+        super(TrainingLuna2dSegmentationDataset, self).__init__(*args, **kwargs)
+
+        self.ratio_ini = 2
+
+    def __len__(self):
+        return 300000
+
+    def shuffle_samples(self):
+        random.shuffle(self.candidate_info_list)
+        random.shuffle(self.pos_list)
+
+    def __getitem__(self, ndx):
+        candidate_info_tup = self.pos_list[ndx % len(self.pos_list)]
+        return self.getitem_training_crop(candidate_info_tup)
+
+    def getitem_training_crop(self, candidate_info_tup):
+        ct_a, pos_a, center_irc = get_ct_raw_candidate(candidate_info_tup.series_uid, candidate_info_tup.center_xyz,
+                                                       (7, 96, 96))
+        pos_a = pos_a[3:4]
+
+        row_offset = random.randrange(0, 32)
+        col_offset = random.randrange(0, 32)
+        ct_t = torch.from_numpy(ct_a[:, row_offset:row_offset + 64, col_offset:col_offset + 64]).to(torch.float32)
+        pos_t = torch.from_numpy(pos_a[:, row_offset:row_offset + 64, col_offset:col_offset + 64]).to(torch.float32)
+
+        slice_ndx = center_irc.index
+
+        return ct_t, pos_t, candidate_info_tup.series_uid, slice_ndx
